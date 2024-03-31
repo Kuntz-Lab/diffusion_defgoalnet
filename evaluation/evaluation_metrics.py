@@ -8,6 +8,7 @@ from scipy.stats import entropy
 from sklearn.neighbors import NearestNeighbors
 from numpy.linalg import norm
 from tqdm.auto import tqdm
+import torch.nn as nn
 
 
 _EMD_NOT_IMPL_WARNED = False
@@ -37,6 +38,111 @@ def distChamfer(a, b):
     P = (rx.transpose(2, 1) + ry - 2 * zz)
     return P.min(1)[0], P.min(2)[0]
 
+def chamfer_dist_normalized_torch(a, b):
+    x, y = a, b
+    bs, num_points_x, points_dim = x.size()
+    _, num_points_y, _ = y.size()  # Get the number of points in y
+    xx = torch.bmm(x, x.transpose(2, 1))
+    yy = torch.bmm(y, y.transpose(2, 1))
+    zz = torch.bmm(x, y.transpose(2, 1))
+    diag_ind_x = torch.arange(0, num_points_x).to(a).long()
+    diag_ind_y = torch.arange(0, num_points_y).to(b).long()  # New line to handle different sizes
+    rx = xx[:, diag_ind_x, diag_ind_x].unsqueeze(1).expand_as(xx)
+    ry = yy[:, diag_ind_y, diag_ind_y].unsqueeze(1).expand_as(yy)
+    P = (rx.transpose(2, 1) + ry - 2 * zz)
+    # Normalizing by respective number of points
+    return P.min(1)[0] / num_points_x + P.min(2)[0] / num_points_y
+
+
+def chamfer_dist_normalized_numpy(a, b):
+    if a.ndim == 2:
+        a = a[None]
+    if b.ndim == 2:
+        b = b[None]
+    # Assuming a and b shapes are (bs, num_points, points_dim)
+    bs, num_points_x, points_dim = a.shape
+    _, num_points_y, _ = b.shape
+    
+    # Compute pairwise distance matrices
+    # Expand dims to broadcast, subtract, then sum square over the last dimension to get squared distances
+    xx = np.sum(a**2, axis=2)[:, :, np.newaxis]
+    yy = np.sum(b**2, axis=2)[:, np.newaxis, :]
+    zz = np.matmul(a, b.transpose(0, 2, 1))
+    
+    # Compute the pairwise distance matrices
+    rx = xx + np.zeros_like(yy)
+    ry = yy + np.zeros_like(xx)
+    P = (rx + ry - 2 * zz)
+    
+    # Compute minimum along the respective axis and normalize by the number of points
+    dist_a_to_b = np.min(P, axis=2) / num_points_x
+    dist_b_to_a = np.min(P, axis=1) / num_points_y
+    
+    # Sum the normalized distances to get the final normalized Chamfer distance
+    return np.sum(dist_a_to_b, axis=1) + np.sum(dist_b_to_a, axis=1)
+
+def chamfer_dist_normalized_open3d(a, b):
+    import open3d as o3d
+    # Handle input shapes to ensure they are in batch format
+    if a.ndim == 2:
+        a = a[None, :]
+    if b.ndim == 2:
+        b = b[None, :]
+
+    # Initialize list to hold Chamfer distances for each sample in the batch
+    chamfer_distances = []
+    
+    for a_sample, b_sample in zip(a, b):
+        # Convert numpy arrays to Open3D point clouds
+        pc_a = o3d.geometry.PointCloud()
+        pc_b = o3d.geometry.PointCloud()
+        pc_a.points = o3d.utility.Vector3dVector(a_sample)
+        pc_b.points = o3d.utility.Vector3dVector(b_sample)
+        
+        # Compute nearest neighbor distances from a to b
+        dist_a_to_b = np.asarray(pc_a.compute_point_cloud_distance(pc_b))
+        
+        # Compute nearest neighbor distances from b to a
+        dist_b_to_a = np.asarray(pc_b.compute_point_cloud_distance(pc_a))
+        
+        # Normalize and sum distances
+        chamfer_dist = (np.sum(dist_a_to_b) / len(dist_a_to_b) + np.sum(dist_b_to_a) / len(dist_b_to_a))
+        chamfer_distances.append(chamfer_dist)
+    
+    # Convert list to numpy array to match expected output format
+    return np.array(chamfer_distances)
+
+
+class ChamferLoss(nn.Module):
+    def __init__(self):
+        super(ChamferLoss, self).__init__()
+        self.use_cuda = torch.cuda.is_available()
+
+    def batch_pairwise_dist(self, x, y):
+        bs, num_points_x, points_dim = x.size()
+        _, num_points_y, _ = y.size()
+        xx = torch.bmm(x, x.transpose(2, 1))
+        yy = torch.bmm(y, y.transpose(2, 1))
+        zz = torch.bmm(x, y.transpose(2, 1))
+        diag_ind_x = torch.arange(0, num_points_x)
+        diag_ind_y = torch.arange(0, num_points_y)
+        if x.get_device() != -1:
+            diag_ind_x = diag_ind_x.cuda(x.get_device())
+            diag_ind_y = diag_ind_y.cuda(x.get_device())
+        rx = xx[:, diag_ind_x, diag_ind_x].unsqueeze(1).expand_as(zz.transpose(2, 1))
+        ry = yy[:, diag_ind_y, diag_ind_y].unsqueeze(1).expand_as(zz)
+        P = (rx.transpose(2, 1) + ry - 2 * zz)
+        return P
+
+    def forward(self, preds, gts):
+        P = self.batch_pairwise_dist(gts, preds)
+        mins, _ = torch.min(P, 1)
+        loss_1 = torch.sum(mins)
+        mins, _ = torch.min(P, 2)
+        loss_2 = torch.sum(mins)
+        return loss_1 + loss_2
+
+    
 
 def EMD_CD(sample_pcs, ref_pcs, batch_size, reduced=True):
     N_sample = sample_pcs.shape[0]

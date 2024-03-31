@@ -6,6 +6,8 @@ import time
 import logging
 import logging.handlers
 import pickle5 as pickle
+from copy import deepcopy
+import open3d
 
 THOUSAND = 1000
 MILLION = 1000000
@@ -166,7 +168,7 @@ def pcd_ize(pc, color=None, vis=False):
     """ 
     Convert point cloud numpy array to an open3d object (usually for visualization purpose).
     """
-    import open3d
+    
     pcd = open3d.geometry.PointCloud()
     pcd.points = open3d.utility.Vector3dVector(pc)   
     if color is not None:
@@ -202,3 +204,130 @@ def read_pickle_data(data_path):
 def write_pickle_data(data, data_path, protocol=3):
     with open(data_path, 'wb') as handle:
         pickle.dump(data, handle, protocol=protocol)
+
+def down_sampling(pc, num_pts=1024, return_indices=False):
+    # farthest_indices,_ = farthest_point_sampling(pc, num_pts)
+    # pc = pc[farthest_indices.squeeze()]  
+    # return pc
+
+    """
+    Input:
+        pc: point cloud data, [B, N, D] where B = num batches, N = num points, D = feature size (typically D=3)
+        num_pts: number of samples
+    Return:
+        centroids: sampled pointcloud index, [num_pts, D]
+        pc: down_sampled point cloud, [num_pts, D]
+    """
+
+    if pc.ndim == 2:
+        # insert batch_size axis
+        pc = deepcopy(pc)[None, ...]
+
+    B, N, D = pc.shape
+    xyz = pc[:, :,:3]
+    centroids = np.zeros((B, num_pts))
+    distance = np.ones((B, N)) * 1e10
+    farthest = np.random.uniform(low=0, high=N, size=(B,)).astype(np.int32)
+
+    for i in range(num_pts):
+        centroids[:, i] = farthest
+        centroid = xyz[np.arange(0, B), farthest, :] # (B, D)
+        centroid = np.expand_dims(centroid, axis=1) # (B, 1, D)
+        dist = np.sum((xyz - centroid) ** 2, -1) # (B, N)
+        mask = dist < distance
+        distance[mask] = dist[mask]
+        farthest = np.argmax(distance, -1) # (B,)
+
+    pc = pc[np.arange(0, B).reshape(-1, 1), centroids.astype(np.int32), :]
+
+    if return_indices:
+        return pc.squeeze(), centroids.astype(np.int32)
+
+    return pc.squeeze()
+
+def down_sampling_torch(pc, num_pts=1024, return_indices=False):
+    """
+    Input:
+        pc: point cloud data, [B, N, D] where B = num batches, N = num points, D = feature size (typically D=3)
+        num_pts: number of samples
+    Return:
+        centroids: sampled point cloud index, [num_pts, D]
+        pc: down-sampled point cloud, [num_pts, D]
+    """
+    import torch
+    if pc.ndim == 2:
+        # Insert batch_size axis
+        pc = pc.unsqueeze(0)
+
+    B, N, D = pc.shape
+    xyz = pc[:, :, :3]
+    centroids = torch.zeros((B, num_pts), dtype=torch.long, device=pc.device)
+    distance = torch.ones((B, N), dtype=pc.dtype, device=pc.device) * 1e10
+    farthest = torch.randint(0, N, (B,), dtype=torch.long, device=pc.device)
+
+    for i in range(num_pts):
+        centroids[:, i] = farthest
+        centroid = xyz[torch.arange(0, B), farthest, :]  # (B, D)
+        centroid = centroid.unsqueeze(1)  # (B, 1, D)
+        dist = torch.sum((xyz - centroid) ** 2, -1)  # (B, N)
+        mask = dist < distance
+        distance[mask] = dist[mask]
+        farthest = torch.argmax(distance, -1)  # (B,)
+
+    pc = pc[torch.arange(0, B).view(-1, 1), centroids, :]
+
+    if return_indices:
+        return pc.squeeze(), centroids
+
+    return pc.squeeze()
+
+def print_color(text, color="red"):
+
+    RESET = "\033[0m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+
+    if color == "red":
+        print(RED + text + RESET)
+    elif color == "green":
+        print(GREEN + text + RESET)
+    elif color == "yellow":
+        print(YELLOW + text + RESET)
+    elif color == "blue":
+        print(BLUE + text + RESET)
+    else:
+        print(text)
+
+
+def spherify_point_cloud_open3d(point_cloud, radius=0.002, color=None, vis=False):
+    """
+    Use Open3D to visualize a point cloud where each point is represented by a sphere.
+    """
+    """
+    Visualize a point cloud where each point is represented by a sphere.
+    
+    Parameters:
+    - point_cloud: NumPy array of shape (N, 3), representing the point cloud.
+    - radius: float, the radius of each sphere used to represent a point.
+    """
+    # Create an empty list to hold the sphere meshes
+    sphere_meshes = []
+    
+    # Iterate over the points in the point cloud
+    for point in point_cloud:
+        # Create a mesh sphere for the current point
+        sphere = open3d.geometry.TriangleMesh.create_sphere(radius=radius)
+        sphere.translate(tuple(point))  # Move the sphere to the point's location
+        if color is not None:
+            sphere.paint_uniform_color(color) 
+        sphere_meshes.append(sphere)
+    
+    # Combine all spheres into one mesh
+    combined_mesh = open3d.geometry.TriangleMesh()
+    for sphere in sphere_meshes:
+        combined_mesh += sphere
+    if vis:
+        open3d.visualization.draw_geometries([combined_mesh])
+    return combined_mesh

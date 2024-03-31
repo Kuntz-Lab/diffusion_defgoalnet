@@ -70,19 +70,49 @@ class DefGoalNetDataset(Dataset):
         context_pc = (context_pc - shift) / scale
 
         
-        return {'pointcloud': pc, 'init_pc': init_pc, 'context_pc': context_pc}
-    
-    
-    
-    
+        return {'pointcloud': pc, 'init_pc': init_pc, 'context_pc': context_pc}         
 
 
+class RetractionCuttingDataset(Dataset):
+    """predict mani point using segmentation"""
+
+
+    def __init__(self, dataset_path):
+        """
+        Args:
+
+        """ 
+        self.dataset_path = dataset_path
+        self.filenames = os.listdir(self.dataset_path)
+            
+    def load_pickle_data(self, filename):
+        with open(os.path.join(self.dataset_path, filename), 'rb') as handle:
+            return pickle.load(handle)            
+
+    def __len__(self):
+        return len(self.filenames)
+
+    def __getitem__(self, idx):    
+            
+        sample = self.load_pickle_data(f"processed_sample_{idx}.pickle")
+
+        goal_pcs = torch.from_numpy(sample["partial_goal_pcs"]).float()  # shape (2, N, 3)
+        init_pc = torch.from_numpy(sample["partial_init_pc"]).float()  # shape (N, 3)
+        context_pc = torch.from_numpy(sample["context"]).float()  # shape (M, 3)
 
         
-         
+        shift = init_pc.mean(dim=0)
+        scale = (init_pc - shift).flatten().std()
+        
+        ## Shift the point cloud to the origin and scale it to have unit variance
+        goal_pcs = (goal_pcs - shift) / scale  # shape (2, N, 3)
+
+        init_pc = (init_pc - shift) / scale        
+        context_pc = (context_pc - shift) / scale
+        init_pc = init_pc.unsqueeze(0).repeat(goal_pcs.shape[0], 1, 1)  # shape (2, N, 3)
+        context_pc = context_pc.unsqueeze(0).repeat(goal_pcs.shape[0], 1, 1)  # shape (2, M, 3)
 
         
-        return sample   
-
+        return {'goal_pcs': goal_pcs, 'init_pc': init_pc, 'context_pc': context_pc}   
 
 
